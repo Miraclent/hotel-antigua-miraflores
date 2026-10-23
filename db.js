@@ -10,6 +10,7 @@
 
 const path = require('path');
 const DB_FILE = process.env.HOTEL_DB || path.join(__dirname, 'hotel.db');
+const { MetodoPagoFactory } = require('./metodos-pago');
 
 // ─── Adaptador: better-sqlite3 ó node:sqlite ────────────────────────────────
 let db;
@@ -481,20 +482,48 @@ const store = {
     run('UPDATE reservas SET total = ? WHERE id = ?', +(r.total + +b.monto).toFixed(2), reservaId);
     return get('SELECT * FROM consumos WHERE id = ?', Number(info.lastInsertRowid));
   },
-
+  
   // PAGOS
   pagoAdd(reservaId, b) {
     const r = get('SELECT * FROM reservas WHERE id = ?', reservaId);
     if (!r) throw err(404, 'Reserva no encontrada');
-    if (!b.monto || !b.metodo) throw err(400, 'Monto y método son obligatorios', 'incompleto');
-    if (!b.nota || !b.nota.trim()) throw err(400, 'Debes registrar una nota o motivo del pago (ej: adelanto, saldo, consumibles, cargo extra)', 'nota_requerida');
-    const nuevoPagado = +(r.pagado + +b.monto).toFixed(2);
+
+    const monto = Number(b.monto);
+
+    if (!Number.isFinite(monto) || monto <= 0 || !b.metodo) {
+      throw err(400, 'Monto válido y método son obligatorios', 'incompleto');
+    }
+
+    if (typeof b.nota !== 'string' || !b.nota.trim()) {
+      throw err(400, 'Debes registrar una nota o motivo del pago', 'nota_requerida');
+    }
+
+    let pago;
+
+    try {
+      pago = MetodoPagoFactory.crear(b.metodo).procesar(monto);
+    } catch (e) {
+      throw err(400, e.message, 'metodo_no_soportado');
+    }
+
+    const nuevoPagado = +(r.pagado + pago.monto).toFixed(2);
     const diferencia = +(nuevoPagado - r.total).toFixed(2);
-    const info = run('INSERT INTO pagos (reserva_id,monto,metodo,fecha,nota,diferencia) VALUES (?,?,?,?,?,?)',
-      reservaId, +b.monto, b.metodo, today(), b.nota.trim(), diferencia > 0 ? diferencia : 0);
+
+    const info = run(
+      'INSERT INTO pagos (reserva_id,monto,metodo,fecha,nota,diferencia) VALUES (?,?,?,?,?,?)',
+      reservaId,
+      pago.monto,
+      pago.metodo,
+      today(),
+      b.nota.trim(),
+      diferencia > 0 ? diferencia : 0
+    );
+
     run('UPDATE reservas SET pagado = ? WHERE id = ?', nuevoPagado, reservaId);
+
     return get('SELECT * FROM pagos WHERE id = ?', Number(info.lastInsertRowid));
   },
+
 
   // USUARIOS
   usuariosList() { return all('SELECT id,nombre,apellido,email,rol,activo FROM usuarios ORDER BY id').map(u => ({ ...u, activo: !!u.activo })); },
